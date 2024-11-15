@@ -10,7 +10,7 @@ using AUIT.Solvers;
 using AUIT.AdaptationObjectives.Definitions;
 using AUIT.Extras;
 using Cysharp.Threading.Tasks;
-using UnityEngine.Serialization;
+using UnityEngine;
 
 namespace AUIT
 {
@@ -23,31 +23,18 @@ namespace AUIT
         private readonly List<PropertyTransition> _propertyTransitions = new();
         private readonly List<AdaptationListener> _adaptationListeners = new();
         
-        public enum Solver
+        private enum Solver
         {
             SimulatedAnnealing,
             GeneticAlgorithm
         }
 
         [SerializeField]
-        private Solver solver = Solver.SimulatedAnnealing;
+        private Solver solverType;
+        private IAsyncSolver _solver;
 
-        [Tooltip("Number of iterations the solver will run for. A higher " +
-                 "number can lead to better solutions but take longer to " +
-                 "execute.")]
-        public int iterations = 1500;
-
+        [SerializeReference] public IAsyncSolver solverSettings;
         public bool developmentMode = true;
-        
-        // Simulating annealing hyperparameters
-        public float minimumTemperature = 0.000001f;
-        public float initialTemperature = 10000f;
-        public float annealingSchedule = 0.98f;
-        public float earlyStopping = 0.02f;
-        public int iterationsPerFrame = 50;
-        
-        private IAsyncSolver _asyncSolver;
-
         private bool _waitingForOptimization;
 
         private bool _job;
@@ -66,9 +53,52 @@ namespace AUIT
         // flag to signal that the manager has been initialized
         [NonSerialized]
         public bool initialized = false;
-
+        
         #region MonoBehaviour Implementation
+        
+        // new start ---
+        public AdaptationManager()
+        {
+            // Ensure that .NET is completely initialized to make sure
+            // async methods work as expected
+            AsyncIO.ForceDotNet.Force();
+        }
 
+        // callback to when some values might have changed
+        public void OnValidate()
+        {
+            // TODO: very inefficient, make sure to only call this when necessary
+            this.initializeSolver();
+        }
+
+        private void initializeSolver()
+        {
+            // make sure that the old solver is destroyed
+            if (_solver != null)
+                //  = false;
+                _solver.Destroy();
+            
+            // select the new solver
+            switch (solverType)
+            {
+                case Solver.SimulatedAnnealing:
+                    _solver = new SimulatedAnnealingSolver();
+                    _solver.Initialize(this);
+                    break;
+                case Solver.GeneticAlgorithm:
+                    _solver = new ParetoFrontierSolver();
+                    _solver.Initialize(this); // not working correctly
+                    InvokeRepeating(nameof(RunJobs), 0, 0.0001f);
+                    break;
+            }
+            // TODO: merge solverSettings with _solver
+            solverSettings = _solver;
+            
+            // Set flag to signal that the manager has been initialized
+            initialized = true;
+        }
+        // new end ---
+        
         private void Start()
         {
             // Start by gathering all the game objects to optimize
@@ -89,41 +119,13 @@ namespace AUIT
                     gameObjectsArray[i].GetComponent<LocalObjectiveHandler>());
             }
 
-            // If solver is a genetic algorithm initialize server/client
-            _isSelectionStrategyNotNull = _selectionStrategy != null;
-            if (solver == Solver.SimulatedAnnealing)
-            {
-                _asyncSolver = new AsyncSimulatedAnnealingSolver();
-            }
-            if (solver == Solver.GeneticAlgorithm)
-            {
-                _asyncSolver = new ParetoFrontierSolver();
-                
-                AsyncIO.ForceDotNet.Force();
-                _asyncSolver.AdaptationManager = this;
-                Debug.Log("Attempting to start solver");
-                _asyncSolver.Initialize();
-                InvokeRepeating(nameof(RunJobs), 0, 0.0001f);
-            }
-
-            // Set flag to signal that the manager has been initialized
-            initialized = true;
+            // Initialize the solver
+            initializeSolver();
         }
 
         private void OnDestroy()
         {
-            if (solver != Solver.GeneticAlgorithm) return;
-
-            // TODO: should check for other Genetic Algorithm solver, 
-            // to ensure correctness of cast
-
-            // if (_asyncSolver is ParetoFrontierSolver)
-            // {
-            //    (ParetoFrontierSolver) _asyncSolver.Destroy();
-            // }
-            ParetoFrontierSolver paretoFrontierSolver =
-                (ParetoFrontierSolver)_asyncSolver;
-            paretoFrontierSolver.Destroy();
+            _solver.Destroy();
         }
 
 
@@ -165,17 +167,6 @@ namespace AUIT
                 return null;
             }
             
-            List<float> hyperparameters = new List<float>();
-            if (solver == Solver.SimulatedAnnealing)
-            {
-                hyperparameters.Add(iterations);
-                hyperparameters.Add(minimumTemperature);
-                hyperparameters.Add(initialTemperature);
-                hyperparameters.Add(annealingSchedule);
-                hyperparameters.Add(earlyStopping);
-                hyperparameters.Add(iterationsPerFrame);
-            }
-            
             // The adaptation manager is responsible for knowing the layout 
             // (e.g. what to optimize). The properties to be optimized should 
             // be obtained dynamically in the future, but for now we hardcode 
@@ -201,9 +192,9 @@ namespace AUIT
                 return null;
             }
 
-            Debug.Log($"Invoking solver: {solver}");
-            OptimizationResponse response = await _asyncSolver.
-                OptimizeCoroutine(currentLayouts, objectives, hyperparameters);
+            Debug.Log($"Invoking solver: {solverType}");
+            OptimizationResponse response = await _solver.
+                OptimizeCoroutine(currentLayouts, objectives);
             
             Debug.Log($"First res: {response.suggested.elements[0].Position}");
             return response;
